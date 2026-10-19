@@ -1,0 +1,27 @@
+# .gitignore
+# Git'e hangi dosyaların takip EDİLMEYECEĞİNİ söyler.
+# API anahtarları ve geçici dosyalar buraya yazılır.
+
+# API anahtarı — ASLA paylaşma!
+.env
+
+# Python önbellek dosyaları
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Sanal ortam klasörleri
+venv/
+.venv/
+env/
+
+# IDE ayar dosyaları
+.vscode/
+.idea/
+*.sublime-project
+*.sublime-workspace
+
+# Windows sistem dosyaları
+Thumbs.db
+desktop.ini
