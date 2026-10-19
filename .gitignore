@@ -25,3 +25,5 @@ env/
 # Windows sistem dosyaları
 Thumbs.db
 desktop.ini
+ses_onbellek/
+ses_testi*.py
