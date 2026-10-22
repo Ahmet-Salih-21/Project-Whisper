@@ -8,6 +8,8 @@ import datetime
 import subprocess
 import urllib.parse
 import webbrowser
+import urllib.request
+import xml.etree.ElementTree as ET
 
 from google.genai import types
 
@@ -128,14 +130,9 @@ def internette_ara(sorgu: str) -> str:
         )
         return cevap.text or "Sonuç bulunamadı."
     except Exception as e:
-        hata = str(e)
-        print(f"[Arama] HATA: {hata[:200]}", flush=True)
-        if "429" in hata or "RESOURCE_EXHAUSTED" in hata:
-            webbrowser.open(
-                "https://www.google.com/search?q=" + urllib.parse.quote_plus(sorgu)
-            )
-            return "Arama kotası doldu. Sonuçları tarayıcıda açtım."
-        return "İnternet araması şu an çalışmıyor."
+        print(f"[Arama] HATA: {e}", flush=True)
+        return f"İnternet araması başarısız: {e}"
+
 
 def haber_basliklari(konu: str = "") -> str:
     """Türkiye'nin güncel haber başlıklarını getirir (Google Haberler).

@@ -1,5 +1,9 @@
 # voice_input.py
-# Mikrofon kaydı ve konuşma tanıma modülü (Optimize edilmiş).
+# Mikrofon kaydı ve konuşma tanıma modülü.
+# - Konuşmanın başlangıcı ve bitişi ortam gürültüsüne ve konuşma seviyesine göre bulunur.
+# - Konuşma bittikten 0.8 sn sonra kayıt kesilir.
+# - Ses, Whisper'a verilmeden önce otomatik yükseltilir (kısık mikrofon için).
+# - Süreler terminale yazılır: [Ses] ...
 
 import time
 from collections import deque
@@ -12,22 +16,28 @@ import whisper_loader
 
 
 class VoiceInputWorker(QThread):
+    """
+    Sinyaller:
+      transcription_ready(str) — metin hazırlandığında
+      error_occurred(str)      — hata oluştuğunda
+      model_loading()          — eski uyumluluk için duruyor, kullanılmıyor
+    """
     transcription_ready = pyqtSignal(str)
     error_occurred = pyqtSignal(str)
     model_loading = pyqtSignal()
 
     SAMPLE_RATE = 16000
-    CHUNK_SEC = 0.08      # Tepki süresini hızlandırmak için 0.1'den 0.08'e düşürüldü
-    MIN_THRESHOLD = 0.004 
-    NOISE_MULT = 2.2      
-    END_NOISE_MULT = 1.6  
-    END_LEVEL_RATIO = 0.25
-    END_MIN = 0.003       
-    SILENCE_SEC = 0.7     # Konuşma bitince bekleme süresi optimize edildi
-    MAX_WAIT_SEC = 8.0    
-    MAX_SPEECH_SEC = 30.0 
+    CHUNK_SEC = 0.1
+    MIN_THRESHOLD = 0.004     # konuşma başlangıç eşiğinin en düşük değeri
+    NOISE_MULT = 2.5          # başlangıç eşiği = gürültü x 2.5
+    END_NOISE_MULT = 1.8      # bitiş eşiği en az gürültü x 1.8
+    END_LEVEL_RATIO = 0.3     # bitiş eşiği en az konuşma seviyesinin %30'u
+    END_MIN = 0.003           # bitiş eşiğinin mutlak alt sınırı
+    SILENCE_SEC = 0.8         # konuşma bitince bu kadar bekle
+    MAX_WAIT_SEC = 8.0        # konuşma başlamazsa vazgeç
+    MAX_SPEECH_SEC = 10.0     # en uzun konuşma
     MIN_SEC = 0.3
-    PRE_ROLL = 2          
+    PRE_ROLL = 3              # konuşmadan önceki kaç parça korunsun
 
     def run(self):
         try:
@@ -63,13 +73,14 @@ class VoiceInputWorker(QThread):
             self.error_occurred.emit(f"Ses tanıma hatası: {e}")
 
     def _record(self):
+        """Konuşma başlayıp bitene kadar kaydeder, baştaki sessizliği kırpar."""
         chunk_size = int(self.SAMPLE_RATE * self.CHUNK_SEC)
         silence_limit = int(self.SILENCE_SEC / self.CHUNK_SEC)
         max_wait = int(self.MAX_WAIT_SEC / self.CHUNK_SEC)
         max_speech = int(self.MAX_SPEECH_SEC / self.CHUNK_SEC)
 
         pre = deque(maxlen=self.PRE_ROLL)
-        recent = deque(maxlen=25)
+        recent = deque(maxlen=30)
         frames = []
         speech_rms = []
         start_thr = self.MIN_THRESHOLD
@@ -94,6 +105,7 @@ class VoiceInputWorker(QThread):
                     rms = float(np.sqrt(np.mean(chunk ** 2)))
                     peak = max(peak, rms)
 
+                    # 1) Konuşma başlamadan önce: gürültüyü ölç, başlangıcı bekle
                     if not speech_started:
                         recent.append(rms)
                         if len(recent) >= 3:
@@ -112,6 +124,7 @@ class VoiceInputWorker(QThread):
                             break
                         continue
 
+                    # 2) Konuşulurken: bitişi, gürültüye ve konuşma seviyesine göre bul
                     frames.append(chunk.copy())
                     speech_chunks += 1
                     if rms > start_thr:
@@ -135,17 +148,24 @@ class VoiceInputWorker(QThread):
         except sd.PortAudioError as e:
             raise RuntimeError(f"Mikrofona erişilemiyor: {e}")
 
+        print(
+            f"[Ses] baslangic_esik={start_thr:.4f} bitis_esik={end_thr:.4f} "
+            f"gurultu={noise:.4f} seviye={level:.4f} "
+            f"en_yuksek={peak:.4f} algilandi={speech_started}",
+            flush=True,
+        )
         return np.concatenate(frames, axis=0) if frames else None
 
     def _transcribe(self, model, audio: np.ndarray) -> str:
+        """Sesi yükseltip doğrudan Whisper'a verir, Türkçe metne çevirir."""
         samples = audio.flatten().astype(np.float32)
 
+        # Kısık mikrofon için: en yüksek nokta 0.8 olacak şekilde ölçekle (en fazla 40 kat)
         tepe = float(np.max(np.abs(samples)))
         if tepe > 0.001:
             samples = samples * min(0.8 / tepe, 40.0)
             samples = np.clip(samples, -1.0, 1.0)
 
-        # Hızı artırmak için beam_size=1 ve float16/fp32 optimizasyonu
         segments, _ = model.transcribe(
             samples,
             language="tr",

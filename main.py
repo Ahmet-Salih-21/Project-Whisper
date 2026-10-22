@@ -1,5 +1,8 @@
 # main.py
-# Uygulamanın ana dosyası - Kararlı ve Kusursuz Orijinal PyQt Motoru
+# Uygulamanın ana dosyası.
+# - Açılışta sistem kontrolü yapar ve sesli selam verir.
+# - Sürekli dinler (düğmeyle açılıp kapanır), Whisper konuşurken mikrofon durur.
+# - Metin/ses alır, Gemini'ye gönderir, cevabı sesli okur.
 
 import whisper_loader
 whisper_loader.preload()
@@ -153,17 +156,23 @@ MAIN_STYLESHEET = f"""
     }}
 """
 
+# Ses tanıma bazen sessizlikte/gürültüde bu tür saçma cümleler uydurur
 SAHTE_METIN_BASLANGICLARI = ("altyazı", "abone ol", "izlediğiniz için")
 
 
 def metin_gurultu_mu(text: str) -> bool:
+    """Çok kısa veya bilinen 'uydurma' ses tanıma çıktılarını eler."""
     t = re.sub(r"[^\w\s]", "", text.lower()).strip()
     if len(t) < 3:
         return True
     return t.startswith(SAHTE_METIN_BASLANGICLARI) and len(t.split()) <= 4
 
 
+# ──────────────────────────────────────────────────────────────
+# Açılış sistem kontrolü
+# ──────────────────────────────────────────────────────────────
 class StartupCheckWorker(QThread):
+    """Açılışta internet/yapay zeka, mikrofon, hoparlör ve ses tanımayı kontrol eder."""
     done = pyqtSignal(bool, str)
 
     def __init__(self, ai, parent=None):
@@ -172,21 +181,28 @@ class StartupCheckWorker(QThread):
 
     def run(self):
         sorunlar = []
+
+        # 1) Yapay zeka sunucusu (kota harcamayan basit bir sorgu)
         try:
             self._ai._client.models.get(model=self._ai._model_name)
         except Exception as e:
             hata = str(e)
+            print(f"[Kontrol] Yapay zeka: {hata[:200]}", flush=True)
             if "429" not in hata and "RESOURCE_EXHAUSTED" not in hata:
                 sorunlar.append("yapay zeka sunucusuna bağlanılamıyor")
 
+        # 2) Mikrofon
         try:
             sd.query_devices(kind="input")
-        except Exception:
+        except Exception as e:
+            print(f"[Kontrol] Mikrofon: {e}", flush=True)
             sorunlar.append("mikrofon bulunamadı")
 
+        # 3) Ses çıkışı
         if not pygame.mixer.get_init():
             sorunlar.append("ses çıkışı başlatılamadı")
 
+        # 4) Ses tanıma modeli
         if whisper_loader.get_model() is None:
             sorunlar.append("ses tanıma modeli yüklenemedi")
 
@@ -205,15 +221,20 @@ class StartupCheckWorker(QThread):
             )
 
 
+# ──────────────────────────────────────────────────────────────
+# Mesaj Balonu
+# ──────────────────────────────────────────────────────────────
 class MessageBubble(QFrame):
+    """Tek bir sohbet mesajını gösteren renkli balonlu widget."""
+
     def __init__(self, text: str, sender: str, parent=None):
         super().__init__(parent)
         is_user = (sender == "user")
 
-        bg = USER_BUBBLE if is_user else AI_BUBBLE
-        border = "#0a3a5a" if is_user else "#0a2a14"
-        prefix_color = ACCENT if is_user else GREEN
-        prefix = "Sen" if is_user else "Whisper"
+        bg     = USER_BUBBLE if is_user else AI_BUBBLE
+        border = "#0a3a5a"   if is_user else "#0a2a14"
+        prefix_color = ACCENT   if is_user else GREEN
+        prefix = "Sen"          if is_user else "Whisper"
 
         self.setStyleSheet(f"""
             QFrame {{
@@ -253,6 +274,9 @@ class MessageBubble(QFrame):
         layout.addWidget(msg_label)
 
 
+# ──────────────────────────────────────────────────────────────
+# Ana Pencere
+# ──────────────────────────────────────────────────────────────
 class WhisperWindow(QMainWindow):
 
     def __init__(self):
@@ -262,19 +286,22 @@ class WhisperWindow(QMainWindow):
         self.resize(800, 900)
         self.setStyleSheet(MAIN_STYLESHEET)
 
+        # Ses sistemi (pygame — ana thread'de başlatılmalı)
         init_audio()
 
+        # Durum değişkenleri
         self._ai = AIEngine()
         self._ai_ready = False
         self._tts_enabled = True
         self._tts_worker = None
         self._voice_worker = None
         self._check_worker = None
-        self._retired = []
-        self._auto_listen = True
-        self._thinking = False
-        self._speaking = False
+        self._retired = []          # durdurulan ama henüz bitmemiş thread'ler
+        self._auto_listen = True    # sürekli dinleme açık mı
+        self._thinking = False      # Gemini cevap hazırlıyor mu
+        self._speaking = False      # Whisper konuşuyor mu
 
+        # ── Düzen ───────────────────────────────────────────
         central = QWidget()
         central.setObjectName("central")
         self.setCentralWidget(central)
@@ -282,6 +309,7 @@ class WhisperWindow(QMainWindow):
         root.setContentsMargins(20, 20, 20, 20)
         root.setSpacing(0)
 
+        # Başlık
         header = QWidget()
         hlay = QVBoxLayout(header)
         hlay.setContentsMargins(0, 0, 0, 10)
@@ -292,7 +320,7 @@ class WhisperWindow(QMainWindow):
         title.setObjectName("title_label")
         title.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        subtitle = QLabel("KİŞİSEL YAPAY ZEKA ASİSTANI")
+        subtitle = QLabel("KİŞİSEL YAPAY ZEKA ASISTANI")
         subtitle.setObjectName("subtitle_label")
         subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
@@ -300,11 +328,13 @@ class WhisperWindow(QMainWindow):
         hlay.addWidget(subtitle)
         root.addWidget(header)
 
+        # Orb
         self._orb = OrbWidget()
         self._orb.setFixedHeight(300)
         root.addWidget(self._orb, alignment=Qt.AlignmentFlag.AlignCenter)
         root.addSpacing(8)
 
+        # Konuşma geçmişi paneli
         history_panel = QWidget()
         history_panel.setObjectName("history_panel")
         hpanel_lay = QVBoxLayout(history_panel)
@@ -325,6 +355,7 @@ class WhisperWindow(QMainWindow):
         root.addWidget(history_panel, stretch=1)
         root.addSpacing(12)
 
+        # ── Giriş Satırı: [Dinle] [metin kutusu] [Gönder] [Ses] ──────
         input_row = QHBoxLayout()
         input_row.setSpacing(8)
 
@@ -354,9 +385,12 @@ class WhisperWindow(QMainWindow):
         input_row.addWidget(self._sound_btn)
         root.addLayout(input_row)
 
+        # AI motorunu başlat
         self._initialize_ai()
 
+    # ── Başlangıç ────────────────────────────────────────────
     def _initialize_ai(self):
+        """AI motorunu başlatır, sonra sistem kontrolünü ve selamı çalıştırır."""
         try:
             self._ai.initialize()
             self._ai_ready = True
@@ -379,12 +413,14 @@ class WhisperWindow(QMainWindow):
 
     @pyqtSlot(bool, str)
     def _on_startup_done(self, ok: bool, message: str):
+        """Sistem kontrolü bitince selamı yazar ve sesli söyler."""
         self._add_message(message, "ai")
         if self._tts_enabled:
             self._speak(message)
         else:
             self._maybe_listen()
 
+    # ── Metin Gönderme ───────────────────────────────────────
     @pyqtSlot()
     def _on_send(self):
         if not self._ai_ready:
@@ -408,6 +444,7 @@ class WhisperWindow(QMainWindow):
 
     @pyqtSlot(str)
     def _on_ai_response(self, response_text: str):
+        """Gemini'den cevap gelince çalışır."""
         self._thinking = False
         self._add_message(response_text, "ai")
         self._set_ui_busy(False)
@@ -426,7 +463,9 @@ class WhisperWindow(QMainWindow):
         self._orb.set_state("waiting")
         QTimer.singleShot(300, self._maybe_listen)
 
+    # ── Sesli Çıktı (TTS) ────────────────────────────────────
     def _speak(self, text: str):
+        """Metni sesli okur. Konuşurken mikrofon kapalıdır."""
         self._stop_listening()
 
         if self._tts_worker and self._tts_worker.isRunning():
@@ -443,15 +482,18 @@ class WhisperWindow(QMainWindow):
         worker.start()
 
     def _on_tts_finished(self, worker):
+        """Konuşma bitince (eski bir worker'ın sinyalini yok say)."""
         if worker is not self._tts_worker:
             return
         self._speaking = False
         if not self._thinking:
             self._orb.set_state("waiting")
+            # Kendi sesinin yankısını duymamak için kısa bekle
             QTimer.singleShot(500, self._maybe_listen)
 
     @pyqtSlot()
     def _on_toggle_sound(self):
+        """Sesi açar / kapatır."""
         self._tts_enabled = not self._tts_enabled
 
         if self._tts_enabled:
@@ -467,7 +509,9 @@ class WhisperWindow(QMainWindow):
         self._sound_btn.style().unpolish(self._sound_btn)
         self._sound_btn.style().polish(self._sound_btn)
 
+    # ── Sürekli Dinleme (STT) ────────────────────────────────
     def _set_listen_button(self, on: bool):
+        """Dinleme düğmesinin görünümünü günceller."""
         self._listen_btn.setText("🔴  Dinliyor" if on else "🎤  Dinle")
         self._listen_btn.setProperty("recording", on)
         self._listen_btn.style().unpolish(self._listen_btn)
@@ -475,6 +519,7 @@ class WhisperWindow(QMainWindow):
 
     @pyqtSlot()
     def _on_toggle_listen(self):
+        """Sürekli dinlemeyi açar veya kapatır."""
         if not self._ai_ready:
             return
         self._auto_listen = not self._auto_listen
@@ -488,6 +533,7 @@ class WhisperWindow(QMainWindow):
                 self._orb.set_state("waiting")
 
     def _maybe_listen(self):
+        """Uygunsa (kimse konuşmuyor, cevap beklenmiyor) mikrofonu dinlemeye alır."""
         if not (self._auto_listen and self._ai_ready):
             return
         if self._thinking or self._speaking:
@@ -503,10 +549,12 @@ class WhisperWindow(QMainWindow):
         worker.start()
 
     def _keep_alive(self, worker):
+        """Çalışan bir thread'in silinip programı çökertmesini önler."""
         self._retired = [w for w in self._retired if w.isRunning()]
         self._retired.append(worker)
 
     def _release_worker(self):
+        """Mevcut dinleme işçisini serbest bırakır (yenisi başlayabilsin)."""
         worker = self._voice_worker
         self._voice_worker = None
         if worker is not None:
@@ -514,14 +562,16 @@ class WhisperWindow(QMainWindow):
         return worker
 
     def _stop_listening(self):
+        """Dinlemeyi durdurur."""
         worker = self._release_worker()
         if worker is not None and worker.isRunning():
             worker.requestInterruption()
 
     @pyqtSlot(str)
     def _on_transcription_ready(self, text: str):
+        """Whisper metni hazırladığında, yazılıp gönderilmiş gibi işler."""
         if self.sender() is not self._voice_worker:
-            return
+            return   # durdurulmuş eski bir dinlemenin sonucu
         self._release_worker()
 
         if self._thinking or self._speaking:
@@ -542,6 +592,7 @@ class WhisperWindow(QMainWindow):
         if self._thinking or self._speaking:
             return
 
+        # Gerçek bir sorun varsa dinlemeyi kapat ve haber ver
         if error.startswith(("Mikrofona", "Ses tanıma")):
             self._add_system_message(f"⚠️ {error}")
             self._auto_listen = False
@@ -549,8 +600,10 @@ class WhisperWindow(QMainWindow):
             self._orb.set_state("waiting")
             return
 
+        # "Ses algılanamadı / anlaşılamadı": sessizce tekrar dinle
         QTimer.singleShot(200, self._maybe_listen)
 
+    # ── Yardımcı Fonksiyonlar ────────────────────────────────
     def _add_message(self, text: str, sender: str):
         bubble = MessageBubble(text, sender)
         self._msg_layout.addWidget(bubble)
@@ -573,11 +626,13 @@ class WhisperWindow(QMainWindow):
         ))
 
     def _set_ui_busy(self, busy: bool):
+        """AI çalışırken giriş alanını ve gönder butonunu devre dışı bırakır."""
         self._input.setEnabled(not busy)
         self._send_btn.setEnabled(not busy)
         self._send_btn.setText("Düşünüyor..." if busy else "Gönder")
 
     def closeEvent(self, event):
+        """Pencere kapanırken ses ve dinleme thread'lerini düzgünce durdurur."""
         self._auto_listen = False
         self._stop_listening()
         stop_audio()
@@ -593,6 +648,9 @@ class WhisperWindow(QMainWindow):
         event.accept()
 
 
+# ──────────────────────────────────────────────────────────────
+# Başlangıç
+# ──────────────────────────────────────────────────────────────
 def main():
     app = QApplication(sys.argv)
     app.setStyle("Fusion")
